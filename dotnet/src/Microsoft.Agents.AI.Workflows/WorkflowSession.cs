@@ -110,7 +110,7 @@ internal sealed class WorkflowSession : AgentSession
     {
         Throw.IfNullOrEmpty(parts);
 
-        AgentResponseUpdate update = new(ChatRole.Assistant, parts)
+        return new(ChatRole.Assistant, parts)
         {
             CreatedAt = DateTimeOffset.UtcNow,
             MessageId = Guid.NewGuid().ToString("N"),
@@ -118,27 +118,19 @@ internal sealed class WorkflowSession : AgentSession
             ResponseId = responseId,
             RawRepresentation = raw
         };
-
-        this.ChatHistoryProvider.AddMessages(this, update.ToChatMessage());
-
-        return update;
     }
 
     public AgentResponseUpdate CreateUpdate(string responseId, object raw, ChatMessage message)
     {
         Throw.IfNull(message);
 
-        AgentResponseUpdate update = new(message.Role, message.Contents)
+        return new(message.Role, message.Contents)
         {
             CreatedAt = message.CreatedAt ?? DateTimeOffset.UtcNow,
             MessageId = message.MessageId ?? Guid.NewGuid().ToString("N"),
             ResponseId = responseId,
             RawRepresentation = raw
         };
-
-        this.ChatHistoryProvider.AddMessages(this, update.ToChatMessage());
-
-        return update;
     }
 
     private async ValueTask<StreamingRun> CreateOrResumeRunAsync(List<ChatMessage> messages, CancellationToken cancellationToken = default)
@@ -170,93 +162,85 @@ internal sealed class WorkflowSession : AgentSession
     IAsyncEnumerable<AgentResponseUpdate> InvokeStageAsync(
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        try
-        {
-            this.LastResponseId = Guid.NewGuid().ToString("N");
-            List<ChatMessage> messages = this.ChatHistoryProvider.GetFromBookmark(this).ToList();
+        this.LastResponseId = Guid.NewGuid().ToString("N");
+        List<ChatMessage> messages = this.ChatHistoryProvider.GetFromBookmark(this).ToList();
 
 #pragma warning disable CA2007 // Analyzer misfiring and not seeing .ConfigureAwait(false) below.
-            await using StreamingRun run =
-                await this.CreateOrResumeRunAsync(messages, cancellationToken).ConfigureAwait(false);
+        await using StreamingRun run =
+            await this.CreateOrResumeRunAsync(messages, cancellationToken).ConfigureAwait(false);
 #pragma warning restore CA2007
 
-            await run.TrySendMessageAsync(new TurnToken(emitEvents: true)).ConfigureAwait(false);
-            await foreach (WorkflowEvent evt in run.WatchStreamAsync(blockOnPendingRequest: false, cancellationToken)
-                                               .ConfigureAwait(false)
-                                               .WithCancellation(cancellationToken))
-            {
-                switch (evt)
-                {
-                    case AgentResponseUpdateEvent agentUpdate:
-                        yield return agentUpdate.Update;
-                        break;
-
-                    case RequestInfoEvent requestInfo:
-                        FunctionCallContent fcContent = requestInfo.Request.ToFunctionCall();
-                        AgentResponseUpdate update = this.CreateUpdate(this.LastResponseId, evt, fcContent);
-                        yield return update;
-                        break;
-
-                    case WorkflowErrorEvent workflowError:
-                        Exception? exception = workflowError.Exception;
-                        if (exception is TargetInvocationException tie && tie.InnerException != null)
-                        {
-                            exception = tie.InnerException;
-                        }
-
-                        if (exception != null)
-                        {
-                            string message = this._includeExceptionDetails
-                                           ? exception.Message
-                                           : "An error occurred while executing the workflow.";
-
-                            ErrorContent errorContent = new(message);
-                            yield return this.CreateUpdate(this.LastResponseId, evt, errorContent);
-                        }
-
-                        break;
-
-                    case SuperStepCompletedEvent stepCompleted:
-                        this.LastCheckpoint = stepCompleted.CompletionInfo?.Checkpoint;
-                        goto default;
-
-                    case WorkflowOutputEvent output:
-                        IEnumerable<ChatMessage>? updateMessages = output.Data switch
-                        {
-                            IEnumerable<ChatMessage> chatMessages => chatMessages,
-                            ChatMessage chatMessage => [chatMessage],
-                            _ => null
-                        };
-
-                        if (!this._includeWorkflowOutputsInResponse || updateMessages == null)
-                        {
-                            goto default;
-                        }
-
-                        foreach (ChatMessage message in updateMessages)
-                        {
-                            yield return this.CreateUpdate(this.LastResponseId, evt, message);
-                        }
-                        break;
-
-                    default:
-                        // Emit all other workflow events for observability (DevUI, logging, etc.)
-                        yield return new AgentResponseUpdate(ChatRole.Assistant, [])
-                        {
-                            CreatedAt = DateTimeOffset.UtcNow,
-                            MessageId = Guid.NewGuid().ToString("N"),
-                            Role = ChatRole.Assistant,
-                            ResponseId = this.LastResponseId,
-                            RawRepresentation = evt
-                        };
-                        break;
-                }
-            }
-        }
-        finally
+        await run.TrySendMessageAsync(new TurnToken(emitEvents: true)).ConfigureAwait(false);
+        await foreach (WorkflowEvent evt in run.WatchStreamAsync(blockOnPendingRequest: false, cancellationToken)
+                                           .ConfigureAwait(false)
+                                           .WithCancellation(cancellationToken))
         {
-            // Do we want to try to undo the step, and not update the bookmark?
-            this.ChatHistoryProvider.UpdateBookmark(this);
+            switch (evt)
+            {
+                case AgentResponseUpdateEvent agentUpdate:
+                    yield return agentUpdate.Update;
+                    break;
+
+                case RequestInfoEvent requestInfo:
+                    FunctionCallContent fcContent = requestInfo.Request.ToFunctionCall();
+                    AgentResponseUpdate update = this.CreateUpdate(this.LastResponseId, evt, fcContent);
+                    yield return update;
+                    break;
+
+                case WorkflowErrorEvent workflowError:
+                    Exception? exception = workflowError.Exception;
+                    if (exception is TargetInvocationException tie && tie.InnerException != null)
+                    {
+                        exception = tie.InnerException;
+                    }
+
+                    if (exception != null)
+                    {
+                        string message = this._includeExceptionDetails
+                                       ? exception.Message
+                                       : "An error occurred while executing the workflow.";
+
+                        ErrorContent errorContent = new(message);
+                        yield return this.CreateUpdate(this.LastResponseId, evt, errorContent);
+                    }
+
+                    break;
+
+                case SuperStepCompletedEvent stepCompleted:
+                    this.LastCheckpoint = stepCompleted.CompletionInfo?.Checkpoint;
+                    goto default;
+
+                case WorkflowOutputEvent output:
+                    IEnumerable<ChatMessage>? updateMessages = output.Data switch
+                    {
+                        IEnumerable<ChatMessage> chatMessages => chatMessages,
+                        ChatMessage chatMessage => [chatMessage],
+                        _ => null
+                    };
+
+                    if (!this._includeWorkflowOutputsInResponse || updateMessages == null)
+                    {
+                        goto default;
+                    }
+
+                    foreach (ChatMessage message in updateMessages)
+                    {
+                        yield return this.CreateUpdate(this.LastResponseId, evt, message);
+                    }
+                    break;
+
+                default:
+                    // Emit all other workflow events for observability (DevUI, logging, etc.)
+                    yield return new AgentResponseUpdate(ChatRole.Assistant, [])
+                    {
+                        CreatedAt = DateTimeOffset.UtcNow,
+                        MessageId = Guid.NewGuid().ToString("N"),
+                        Role = ChatRole.Assistant,
+                        ResponseId = this.LastResponseId,
+                        RawRepresentation = evt
+                    };
+                    break;
+            }
         }
     }
 
