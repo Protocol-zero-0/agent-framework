@@ -28,7 +28,7 @@ public sealed class ExpectedException : Exception
     }
 }
 
-public class WorkflowHostSmokeTests
+public class WorkflowHostSmokeTests : AIAgentHostingExecutorTestsBase
 {
     private sealed class AlwaysFailsAIAgent(bool failByThrowing) : AIAgent
     {
@@ -111,5 +111,27 @@ public class WorkflowHostSmokeTests
         }
 
         hadErrorContent.Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task Test_AsAgent_OutgoingMessagesInHistoryAsync()
+    {
+        // Arrange
+        TestReplayAgent agent = new(TestMessages, TestAgentId, TestAgentName);
+        Workflow handoffWorkflow = new HandoffsWorkflowBuilder(agent).Build();
+        AIAgent workflowAgent = handoffWorkflow.AsAIAgent();
+
+        // Act
+        AgentSession session = await workflowAgent.CreateSessionAsync();
+        AgentResponse response = await workflowAgent.RunAsync(session);
+
+        // Assert
+        WorkflowSession workflowSession = session.Should().BeOfType<WorkflowSession>().Subject;
+
+        ChatMessage[] responseMessages = response.Messages.ToArray();
+        ChatMessage[] sessionMessages = workflowSession.ChatHistoryProvider.GetAllMessages(workflowSession).ToArray();
+
+        // Since we never sent an incoming message, the expectation is that there should be nothing in the session
+        responseMessages.Should().BeEquivalentTo(sessionMessages);
     }
 }
